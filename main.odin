@@ -11,13 +11,16 @@ import "core:math"
 import "core:os"
 import "core:strings"
 
-Vector4 :: [4]f32
-Vector3 :: [3]f32
+Vec4 :: [4]f32
+Vec3 :: [3]f32
+Vec2 :: [2]f32
 
 Shader :: struct {
-  uniforms: map[string]gl.Uniform_Info,
+  uniforms: gl.Uniforms,
   id: u32,
 }
+
+
 
 load_shader :: proc(vertex_filepath, fragment_filepath: string) -> (s: Shader, ok: bool) {
   vertex_source_data, vert_source_ok := os.read_entire_file_from_filename(vertex_filepath, context.temp_allocator)
@@ -59,6 +62,13 @@ Texture2D :: struct {
   filter_max: i32,
 }
 
+Render_Data :: struct {
+  vao: u32,
+  shader: Shader,
+  texture: Texture2D,
+}
+
+
 load_texture :: proc(filename: string, nrChannels: u32) -> (tex: Texture2D, ok: bool) {
   nrChannels: i32
   fname := strings.clone_to_cstring(filename, context.temp_allocator)
@@ -96,12 +106,61 @@ GameState :: enum {
 
 Game :: struct {
   State: GameState,
-  width: u32,
-  height: u32,
+  width: i32,
+  height: i32,
   keys: []sdl.Keycode,
 }
 
+init_sprite_render_data :: proc(s: Shader) -> (rd: Render_Data) {
+  vbo: u32
+  vertices := [?]f32 {
+    // pos    // uv
+    0.0, 1.0, 0.0, 1.0,
+    1.0, 0.0, 1.0, 0.0,
+    0.0, 0.0, 0.0, 0.0,
+    0.0, 1.0, 0.0, 1.0,
+    1.0, 1.0, 1.0, 1.0,
+    1.0, 0.0, 1.0, 0.0
+  }
 
+  gl.GenVertexArrays(1, &rd.vao)
+  gl.GenBuffers(1, &vbo)
+  gl.BindBuffer(gl.ARRAY_BUFFER, vbo)
+  gl.BufferData(gl.ARRAY_BUFFER, size_of(vertices), &vertices, gl.STATIC_DRAW)
+
+  gl.BindVertexArray(rd.vao)
+  gl.EnableVertexAttribArray(0)
+  gl.VertexAttribPointer(0, 4, gl.FLOAT, gl.FALSE, 4 * size_of(f32), 0)
+  gl.BindBuffer(gl.ARRAY_BUFFER, 0)
+  gl.BindVertexArray(0)
+  rd.shader = s
+  return rd
+}
+
+draw_sprite :: proc(pos, size: Vec2, rotation_angle: f32, tex: Texture2D, rd: Render_Data, color: Vec3) {
+  gl.UseProgram(rd.shader.id)
+  color := color
+  translate := glm.mat4Translate(Vec3{pos.x, pos.y, 1.0})
+  scale_offset_plus := glm.mat4Translate(Vec3{0.5 * size.x, 0.5 * size.y, 0})
+  rotate := glm.mat4Rotate(Vec3{0, 0, 1}, glm.radians(rotation_angle))
+  scale_offset_minus := glm.mat4Translate(Vec3{-0.5 * size.x, -0.5 * size.y, 0})
+  scale := glm.mat4Scale(Vec3{size.x, size.y, 1.0})
+  transform := scale * scale_offset_plus * rotate * scale_offset_minus * translate
+  // transform := scale * scale_offset * rotate * translate
+
+  gl.UniformMatrix4fv(rd.shader.uniforms["model"].location, 1, false, &transform[0][0])
+  gl.Uniform3fv(rd.shader.uniforms["sprite_color"].location, 1, &color[0])
+
+  gl.ActiveTexture(gl.TEXTURE0)
+  bind_texture(tex)
+
+  gl.BindVertexArray(rd.vao); defer gl.BindVertexArray(0)
+  gl.DrawArrays(gl.TRIANGLES, 0, 6)
+}
+
+render_game :: proc(game: Game, rd: Render_Data) {
+  draw_sprite(Vec2{200, 200}, Vec2{300, 400}, 45.0,  vec3{0, 1, 0)
+}
 
 main :: proc() {
   WINDOW_WIDTH :: 800
@@ -114,6 +173,7 @@ main :: proc() {
     return
   }
   defer sdl.DestroyWindow(window)
+  fmt.println(window)
   stbi.set_flip_vertically_on_load(1)
 
   gl_context := sdl.GL_CreateContext(window)
@@ -122,10 +182,12 @@ main :: proc() {
   gl.Viewport(0, 0, WINDOW_WIDTH, WINDOW_HEIGHT)
 
   s, ok := load_shader("shaders/default.vert", "shaders/default.frag")
-
+  sprite_render_data := init_sprite_render_data(s)
+  fmt.println(sprite_render_data)
+  game := Game{}
   start_tick := time.tick_now()
   blend:f32 = 0.2
-  vec := Vector4 {1, 0, 0, 1}
+  projection := glm.mat4Ortho3d(0, WINDOW_WIDTH, WINDOW_HEIGHT, 0, -1, 1)
 
   loop: for {
     event: sdl.Event
@@ -151,57 +213,21 @@ main :: proc() {
           height: i32
 
           sdl.GL_GetDrawableSize(window, &width, &height)
+          game.width = width
+          game.height = height
+          projection = glm.mat4Ortho3d(0, cast(f32)width, cast(f32)height, 0, -1, 1)
           gl.Viewport(0, 0, width, height)
       }
     }
 
 
     gl.ClearColor(0.2, 0.3, 0.3, 1.0)
-    gl.Clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT)
+    gl.Clear(gl.COLOR_BUFFER_BIT)
     counter := sdl.GetPerformanceCounter()
     freq := sdl.GetPerformanceFrequency()
     t:f32 = cast(f32)(cast(f32)counter  /  cast(f32)freq)
-    // fmt.println(t)
-
-
+    render_game(game, sprite_render_data)
     sdl.GL_SwapWindow(window)
   }
   fmt.println("hello world")
 }
-
-vertex_source := `#version 330 core
-
-layout (location = 0) in vec3 aPos;
-layout (location = 1) in vec3 aColor;
-layout (location = 2) in vec2 aTexCoord;
-
-uniform mat4 model;
-uniform mat4 view;
-uniform mat4 projection;
-
-out vec3 vertex_color;
-out vec2 TexCoord;
-
-void main() {
-  gl_Position = projection * view * model * vec4(aPos, 1.0);
-  // gl_Position = transform * vec4(aPos, 1.0);
-  vertex_color = aColor;
-  TexCoord = aTexCoord;
-}
-`
-
-fragment_source_color := `#version 330 core
-out vec4 frag_color;
-in vec3 vertex_color;
-in vec2 TexCoord;
-
-uniform sampler2D texture1;
-uniform sampler2D texture2;
-uniform float blend;
-
-void main() {
-  // frag_color = vec4(1);
-  frag_color = mix(texture(texture1, TexCoord),
-                   texture(texture2, TexCoord), blend);
-}
-`
