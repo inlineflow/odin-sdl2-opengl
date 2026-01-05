@@ -19,19 +19,6 @@ Shader :: struct {
   id: u32,
 }
 
-GameState :: enum {
-  Active,
-  Menu,
-  Win,
-}
-
-Game :: struct {
-  State: GameState,
-  width: u32,
-  height: u32,
-  keys: []Keycode,
-}
-
 load_shader :: proc(vertex_filepath, fragment_filepath: string) -> (s: Shader, ok: bool) {
   vertex_source_data, vert_source_ok := os.read_entire_file_from_filename(vertex_filepath, context.temp_allocator)
   if !vert_source_ok {
@@ -59,6 +46,61 @@ load_shader :: proc(vertex_filepath, fragment_filepath: string) -> (s: Shader, o
     id = program,
   }, true
 }
+
+Texture2D :: struct {
+  id: u32,
+  width: i32,
+  height: i32,
+  internal_texture_format: i32,
+  image_format: u32,
+  wrap_s: i32,
+  wrap_t: i32,
+  filter_min: i32,
+  filter_max: i32,
+}
+
+load_texture :: proc(filename: string, nrChannels: u32) -> (tex: Texture2D, ok: bool) {
+  nrChannels: i32
+  fname := strings.clone_to_cstring(filename, context.temp_allocator)
+  image_data := stbi.load(fname, &tex.width, &tex.height, &nrChannels, nrChannels)
+  if image_data == nil {
+    return
+  }
+
+  tex.internal_texture_format = gl.RGB
+  tex.image_format = gl.RGB
+  tex.wrap_s = gl.REPEAT
+  tex.wrap_t = gl.REPEAT
+  tex.filter_min = gl.LINEAR
+  tex.filter_max = gl.LINEAR
+
+  gl.BindTexture(gl.TEXTURE_2D, tex.id); defer gl.BindTexture(gl.TEXTURE_2D, 0)
+  gl.TexImage2D(gl.TEXTURE_2D, 0, tex.internal_texture_format, tex.width, tex.height, 0, tex.image_format, gl.UNSIGNED_BYTE, image_data)
+  gl.TexParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, tex.wrap_s)
+  gl.TexParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, tex.wrap_t)
+  gl.TexParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, tex.filter_min)
+  gl.TexParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, tex.filter_max)
+
+  return tex, true
+}
+
+bind_texture :: proc(tex: Texture2D) {
+  gl.BindTexture(gl.TEXTURE_2D, tex.id)
+}
+
+GameState :: enum {
+  Active,
+  Menu,
+  Win,
+}
+
+Game :: struct {
+  State: GameState,
+  width: u32,
+  height: u32,
+  keys: []sdl.Keycode,
+}
+
 
 
 main :: proc() {
