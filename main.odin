@@ -69,8 +69,10 @@ load_texture :: proc(filename: string, desiredChannels: i32, image_format: u32) 
   tex.filter_min = gl.LINEAR
   tex.filter_max = gl.LINEAR
 
+  gl.GenTextures(1, &tex.id)
   gl.BindTexture(gl.TEXTURE_2D, tex.id); defer gl.BindTexture(gl.TEXTURE_2D, 0)
   gl.TexImage2D(gl.TEXTURE_2D, 0, tex.internal_texture_format, tex.width, tex.height, 0, tex.image_format, gl.UNSIGNED_BYTE, image_data)
+  fmt.println("len sprites: ", len(Sprites))
   gl.TexParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, tex.wrap_s)
   gl.TexParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, tex.wrap_t)
   gl.TexParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, tex.filter_min)
@@ -79,7 +81,7 @@ load_texture :: proc(filename: string, desiredChannels: i32, image_format: u32) 
   return tex, true
 }
 
-bind_texture :: proc(tex: Texture2D) {
+bind_texture :: proc(tex: ^Texture2D) {
   gl.BindTexture(gl.TEXTURE_2D, tex.id)
 }
 
@@ -98,12 +100,11 @@ Game :: struct {
 }
 
 Game_Level :: struct {
-  tile_data: []i32,
   rows: i32,
   cols: i32,
   width: i32,
   height: i32,
-  bricks: []Entity,
+  entities: []Entity,
   is_complete: bool,
   arena: vmem.Arena,
 }
@@ -111,9 +112,21 @@ Game_Level :: struct {
 Entity :: struct {
   pos: vec2,
   size: vec2,
+  sprite: ^Sprite2D,
   rotation_degrees: f32,
-  sprite: Sprite2D,
+
+  variant: union {^Brick, ^Player}
+}
+
+Brick :: struct {
+  using entity: Entity,
   is_solid: bool,
+  color: vec3,
+}
+
+Player :: struct {
+  using entity: Entity,
+  velocity: f32,
 }
 
 Texture2D :: struct {
@@ -131,12 +144,11 @@ Texture2D :: struct {
 Sprite2D :: struct {
   vao: u32,
   shader: Shader,
-  texture: Texture2D,
-  color: vec3,
+  texture: ^Texture2D,
 }
 
 
-init_sprite_render_data :: proc(s: Shader) -> (rd: Sprite2D) {
+init_sprite_render_data :: proc(s: Shader, tex: ^Texture2D) -> (rd: Sprite2D) {
   vbo: u32
   vertices := [?]f32 {
     // pos    // uv
@@ -159,14 +171,8 @@ init_sprite_render_data :: proc(s: Shader) -> (rd: Sprite2D) {
   gl.BindBuffer(gl.ARRAY_BUFFER, 0)
   gl.BindVertexArray(0)
   rd.shader = s
+  rd.texture = tex
 
-  face, face_ok := load_texture("awesomeface.png", 4, gl.RGBA)
-  if !face_ok {
-    fmt.eprintln("Couldn't load texture awesomeface.png")
-    return
-  }
-
-  rd.texture = face
   return rd
 }
 
@@ -194,7 +200,19 @@ draw_sprite :: proc(pos, size: vec2, rotation_angle: f32, rd: Sprite2D, color: v
 }
 
 render_game :: proc(game: Game, tex: Texture2D, rd: Sprite2D, projection: ^matrix[4,4]f32) {
-  draw_sprite(vec2{200, 200}, vec2{300, 400}, 45.0, rd, vec3{0, 1, 0}, projection)
+  background := Sprites["background"]
+  draw_sprite(vec2{0, 0}, vec2{cast(f32)game.width, cast(f32)game.height}, 0, background, vec3{1, 1, 1}, projection)
+
+  for lvl in game.levels {
+    for entity in lvl.entities {
+      switch e in entity.variant {
+      case ^Brick:
+        draw_sprite(e.pos, e.size, e.rotation_degrees, e.sprite^, e.color, projection)
+      case ^Player:
+        draw_sprite(e.pos, e.size, e.rotation_degrees, e.sprite^, vec3{1,1,1}, projection)
+      }
+    }
+  }
 }
 
 Block_Type :: enum {
@@ -215,7 +233,7 @@ load_level :: proc(name: string, width, height: i32) -> (level: Game_Level, ok: 
   level_name := strings.concatenate([]string{dir, name}, context.temp_allocator)
   data := os.read_entire_file(level_name, context.temp_allocator) or_return
   it := string(data)
-  cols := 0
+  cols:= 0
   lines_raw := strings.split_lines(it, context.temp_allocator)
   lines := make([dynamic]string, context.temp_allocator)
   for lr in lines_raw {
@@ -240,28 +258,48 @@ load_level :: proc(name: string, width, height: i32) -> (level: Game_Level, ok: 
     append(&rows, row)
   }
 
-  entities := init_level(width, height, len(rows), cols, rows, arena_allocator) 
-  fmt.println(len(rows))
-  return level, true
+  entities := init_level_entities(width, height, len(rows), cols, rows, arena_allocator)
+  lvl := Game_Level{
+    rows = cast(i32)len(rows),
+    cols = cast(i32)cols,
+    width = width,
+    height = height,
+    entities = entities,
+    is_complete = false,
+    arena = level_arena,
+  }
+  return lvl, true
 }
 
-init_level :: proc(lvl_width, lvl_height: i32, rows, cols: int, tiles: [dynamic][dynamic]int, allocator := context.allocator) -> []Entity {
+new_entity :: proc($T: typeid, allocator := context.allocator) -> ^T {
+  e := new(T, allocator)
+  e.variant = e
+  return e
+}
+
+init_level_entities :: proc(lvl_width, lvl_height: i32, rows, cols: int, tiles: [dynamic][dynamic]int, allocator := context.allocator) -> []Entity {
   // NOTE(danil): I don't like using [dynamic] everywhere
   entities := make([dynamic]Entity, allocator)
   unit_width:f32 = cast(f32)lvl_width / cast(f32)cols
-  unit_height:f32 = cast(f32)lvl_height / cast(f32)rows
-  fmt.println("rows: ", rows)
-  fmt.println("cols: ", cols)
-  fmt.println("tiles: ", tiles)
-  fmt.println("len(tiles): ", len(tiles))
+  unit_height:f32 = cast(f32)lvl_height / 2 / cast(f32)rows
+  // fmt.println("rows: ", rows)
+  // fmt.println("cols: ", cols)
+  // fmt.println("tiles: ", tiles)
+  // fmt.println("len(tiles): ", len(tiles))
+  spr := &Sprites["block"]
   color:vec3
-  for x in 0..<rows {
-    for y in 0..<cols {
-      switch cast(Block_Type)tiles[x][y] {
+  is_solid := false
+  for y in 0..<rows {
+    for x in 0..<len(tiles[y]) {
+      spr := &Sprites["block"]
+      color:vec3
+      switch cast(Block_Type)tiles[y][x] {
       case .EMPTY:
         continue
       case .SOLID:
         color = vec3{1,1,1}
+        is_solid = true
+        spr = &Sprites["block_solid"]
       case .BLUE:
         color = vec3{0.2, 0.6, 1}
       case .GREEN:
@@ -276,20 +314,40 @@ init_level :: proc(lvl_width, lvl_height: i32, rows, cols: int, tiles: [dynamic]
 
       pos := vec2{ unit_width * cast(f32)x, unit_height * cast(f32)y }
       size := vec2{ unit_width, unit_height }
-      spr := Sprites["block"]
-      spr.color = color
-      entity := Entity{
-        pos = pos,
-        size = size,
-        rotation_degrees = 0,
-        sprite = spr,
-        is_solid = true,
-      }
-      append(&entities, entity)
+      brick := new_entity(Brick, allocator)
+      brick.pos = pos
+      brick.size = size
+      brick.rotation_degrees = 0
+      brick.sprite = spr
+      brick.is_solid = is_solid
+      brick.color = color
+
+      // brick := Brick{
+      //   pos = pos,
+      //   size = size,
+      //   rotation_degrees = 0,
+      //   sprite = spr,
+      //   is_solid = is_solid,
+      //   color = color,
+      //   variant = {^Brick},
+      // }
+      append(&entities, brick)
     }
   }
 
-  fmt.println(entities)
+  PLAYER_VELOCITY :: 500
+  PLAYER_SIZE :: vec2{100, 20} 
+  player_sprite := &Sprites["paddle"]
+  player_pos := vec2{
+    cast(f32)(cast(f32)lvl_width / 2 - PLAYER_SIZE.x / 2), 
+    cast(f32)(cast(f32)lvl_height - PLAYER_SIZE.y)}
+
+  p := new_entity(Player, allocator)
+  p.pos = player_pos
+  p.sprite = player_sprite
+  p.size = PLAYER_SIZE
+  p.velocity = PLAYER_VELOCITY
+  append(&entities, p)
   return entities[:]
 }
 
@@ -314,24 +372,61 @@ main :: proc() {
   gl.Viewport(0, 0, WINDOW_WIDTH, WINDOW_HEIGHT)
 
   s, ok := load_shader("shaders/default.vert", "shaders/default.frag")
-  sprite_render_data := init_sprite_render_data(s)
-  Sprites["block"] = sprite_render_data
-  // fmt.println(Sprites["block"])
-  game := Game{}
-  start_tick := time.tick_now()
-  blend:f32 = 0.2
-  projection := glm.mat4Ortho3d(0, WINDOW_WIDTH, WINDOW_HEIGHT, 0, -1, 1)
-  face, face_ok := load_texture("awesomeface.png", 4, gl.RGBA)
-  if !face_ok {
-    fmt.eprintln("Couldn't load texture awesomeface.png")
+  if !ok {
+    fmt.eprintln("couldn't load shader")
     return
   }
 
-  level, level_ok := load_level("1.lvl", 800, 600)
+  block, block_ok := load_texture("block.png", 4, gl.RGBA)
+  if !block_ok {
+    fmt.eprintln("Couldn't load texture block.png")
+    return
+  }
+  sprite_render_data := init_sprite_render_data(s, &block)
+  Sprites["block"] = sprite_render_data
+  // fmt.println(Sprites["block"])
+  start_tick := time.tick_now()
+  blend:f32 = 0.2
+  projection := glm.mat4Ortho3d(0, WINDOW_WIDTH, WINDOW_HEIGHT, 0, -1, 1)
+
+  block_solid, block_solid_ok := load_texture("block_solid.png", 4, gl.RGBA)
+  if !block_solid_ok {
+    fmt.eprintln("Couldn't load texture block_solid.png")
+    return
+  }
+
+  block_solid_sprite := init_sprite_render_data(s, &block_solid)
+  Sprites["block_solid"] = block_solid_sprite
+
+  background, background_ok := load_texture("background.jpg", 3, gl.RGB)
+  if !background_ok {
+    fmt.eprintln("Couldn't load texture block_solid.png")
+    return
+  }
+  background_sprite := init_sprite_render_data(s, &background)
+  Sprites["background"] = background_sprite
+
+  paddle, paddle_ok := load_texture("paddle.png", 4, gl.RGBA)
+  if !paddle_ok {
+    fmt.eprintln("Couldn't load texture paddle.png")
+    return
+  }
+  paddle_sprite := init_sprite_render_data(s, &paddle)
+  Sprites["paddle"] = paddle_sprite
+
+  level, level_ok := load_level("1.lvl", WINDOW_WIDTH, WINDOW_HEIGHT)
   if !level_ok {
     fmt.eprintln("COULDN'T LOAD LEVEL AAAAAAAAAAAAAAAAAAAAA")
+    return
   }
   free_all(context.temp_allocator)
+  game := Game{
+    State = GameState.Active,
+    width = WINDOW_WIDTH,
+    height = WINDOW_HEIGHT,
+    keys = nil,
+    levels = []Game_Level { level },
+  }
 
   loop: for {
     event: sdl.Event
@@ -370,7 +465,7 @@ main :: proc() {
     counter := sdl.GetPerformanceCounter()
     freq := sdl.GetPerformanceFrequency()
     t:f32 = cast(f32)(cast(f32)counter  /  cast(f32)freq)
-    render_game(game, face, sprite_render_data, &projection)
+    render_game(game, block, sprite_render_data, &projection)
     sdl.GL_SwapWindow(window)
   }
   fmt.println("hello world")
