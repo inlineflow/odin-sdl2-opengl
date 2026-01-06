@@ -10,10 +10,12 @@ import stbi "stb/image"
 import "core:math"
 import "core:os"
 import "core:strings"
+import "core:strconv"
+import vmem "core:mem/virtual"
 
-Vec4 :: [4]f32
-Vec3 :: [3]f32
-Vec2 :: [2]f32
+vec4 :: [4]f32
+vec3 :: [3]f32
+vec2 :: [2]f32
 
 Shader :: struct {
   uniforms: gl.Uniforms,
@@ -50,35 +52,18 @@ load_shader :: proc(vertex_filepath, fragment_filepath: string) -> (s: Shader, o
   }, true
 }
 
-Texture2D :: struct {
-  id: u32,
-  width: i32,
-  height: i32,
-  internal_texture_format: i32,
-  image_format: u32,
-  wrap_s: i32,
-  wrap_t: i32,
-  filter_min: i32,
-  filter_max: i32,
-}
-
-Render_Data :: struct {
-  vao: u32,
-  shader: Shader,
-  texture: Texture2D,
-}
 
 
-load_texture :: proc(filename: string, nrChannels: u32) -> (tex: Texture2D, ok: bool) {
+load_texture :: proc(filename: string, desiredChannels: i32, image_format: u32) -> (tex: Texture2D, ok: bool) {
   nrChannels: i32
   fname := strings.clone_to_cstring(filename, context.temp_allocator)
-  image_data := stbi.load(fname, &tex.width, &tex.height, &nrChannels, nrChannels)
+  image_data := stbi.load(fname, &tex.width, &tex.height, &nrChannels, desiredChannels)
   if image_data == nil {
     return
   }
 
-  tex.internal_texture_format = gl.RGB
-  tex.image_format = gl.RGB
+  tex.internal_texture_format = cast(i32)image_format
+  tex.image_format = image_format
   tex.wrap_s = gl.REPEAT
   tex.wrap_t = gl.REPEAT
   tex.filter_min = gl.LINEAR
@@ -109,9 +94,49 @@ Game :: struct {
   width: i32,
   height: i32,
   keys: []sdl.Keycode,
+  levels: []Game_Level,
 }
 
-init_sprite_render_data :: proc(s: Shader) -> (rd: Render_Data) {
+Game_Level :: struct {
+  tile_data: []i32,
+  rows: i32,
+  cols: i32,
+  width: i32,
+  height: i32,
+  bricks: []Entity,
+  is_complete: bool,
+  arena: vmem.Arena,
+}
+
+Entity :: struct {
+  pos: vec2,
+  size: vec2,
+  rotation_degrees: f32,
+  sprite: Sprite2D,
+  is_solid: bool,
+}
+
+Texture2D :: struct {
+  id: u32,
+  width: i32,
+  height: i32,
+  internal_texture_format: i32,
+  image_format: u32,
+  wrap_s: i32,
+  wrap_t: i32,
+  filter_min: i32,
+  filter_max: i32,
+}
+
+Sprite2D :: struct {
+  vao: u32,
+  shader: Shader,
+  texture: Texture2D,
+  color: vec3,
+}
+
+
+init_sprite_render_data :: proc(s: Shader) -> (rd: Sprite2D) {
   vbo: u32
   vertices := [?]f32 {
     // pos    // uv
@@ -134,33 +159,140 @@ init_sprite_render_data :: proc(s: Shader) -> (rd: Render_Data) {
   gl.BindBuffer(gl.ARRAY_BUFFER, 0)
   gl.BindVertexArray(0)
   rd.shader = s
+
+  face, face_ok := load_texture("awesomeface.png", 4, gl.RGBA)
+  if !face_ok {
+    fmt.eprintln("Couldn't load texture awesomeface.png")
+    return
+  }
+
+  rd.texture = face
   return rd
 }
 
-draw_sprite :: proc(pos, size: Vec2, rotation_angle: f32, tex: Texture2D, rd: Render_Data, color: Vec3) {
+draw_sprite :: proc(pos, size: vec2, rotation_angle: f32, rd: Sprite2D, color: vec3, projection: ^matrix[4,4]f32) {
   gl.UseProgram(rd.shader.id)
   color := color
-  translate := glm.mat4Translate(Vec3{pos.x, pos.y, 1.0})
-  scale_offset_plus := glm.mat4Translate(Vec3{0.5 * size.x, 0.5 * size.y, 0})
-  rotate := glm.mat4Rotate(Vec3{0, 0, 1}, glm.radians(rotation_angle))
-  scale_offset_minus := glm.mat4Translate(Vec3{-0.5 * size.x, -0.5 * size.y, 0})
-  scale := glm.mat4Scale(Vec3{size.x, size.y, 1.0})
-  transform := scale * scale_offset_plus * rotate * scale_offset_minus * translate
+  translate := glm.mat4Translate(vec3{pos.x, pos.y, 1.0})
+  scale_offset_plus := glm.mat4Translate(vec3{0.5 * size.x, 0.5 * size.y, 0})
+  rotate := glm.mat4Rotate(vec3{0, 0, 1}, glm.radians(rotation_angle))
+  scale_offset_minus := glm.mat4Translate(vec3{-0.5 * size.x, -0.5 * size.y, 0})
+  scale := glm.mat4Scale(vec3{size.x, size.y, 1.0})
+  // transform := scale * scale_offset_plus * rotate * scale_offset_minus * translate
   // transform := scale * scale_offset * rotate * translate
+  transform := translate * scale_offset_plus * rotate * scale_offset_minus * scale
 
   gl.UniformMatrix4fv(rd.shader.uniforms["model"].location, 1, false, &transform[0][0])
+  gl.UniformMatrix4fv(rd.shader.uniforms["projection"].location, 1, false, &projection^[0][0])
   gl.Uniform3fv(rd.shader.uniforms["sprite_color"].location, 1, &color[0])
 
   gl.ActiveTexture(gl.TEXTURE0)
-  bind_texture(tex)
+  bind_texture(rd.texture)
 
   gl.BindVertexArray(rd.vao); defer gl.BindVertexArray(0)
   gl.DrawArrays(gl.TRIANGLES, 0, 6)
 }
 
-render_game :: proc(game: Game, rd: Render_Data) {
-  draw_sprite(Vec2{200, 200}, Vec2{300, 400}, 45.0,  vec3{0, 1, 0)
+render_game :: proc(game: Game, tex: Texture2D, rd: Sprite2D, projection: ^matrix[4,4]f32) {
+  draw_sprite(vec2{200, 200}, vec2{300, 400}, 45.0, rd, vec3{0, 1, 0}, projection)
 }
+
+Block_Type :: enum {
+  EMPTY,
+  SOLID,
+  BLUE,
+  GREEN,
+  GOLDEN,
+  RED,
+}
+
+Sprites := map[string]Sprite2D{}
+
+load_level :: proc(name: string, width, height: i32) -> (level: Game_Level, ok: bool) {
+  level_arena: vmem.Arena
+  arena_allocator := vmem.arena_allocator(&level_arena)
+  dir := "levels/"
+  level_name := strings.concatenate([]string{dir, name}, context.temp_allocator)
+  data := os.read_entire_file(level_name, context.temp_allocator) or_return
+  it := string(data)
+  cols := 0
+  lines_raw := strings.split_lines(it, context.temp_allocator)
+  lines := make([dynamic]string, context.temp_allocator)
+  for lr in lines_raw {
+    if lr != "" {
+      append(&lines, strings.trim_space(lr))
+    }
+  }
+
+  // NOTE(danil): perhaps using a fixed max size instead of [dynamic, dynamic] would be better
+  rows := make([dynamic][dynamic]int, arena_allocator)
+  for line in lines {
+    chars := strings.split(line, " ", context.temp_allocator)
+    cols = math.max(cols, len(chars))
+    row := make([dynamic]int, context.temp_allocator)
+    for char in chars {
+      i, ok := strconv.parse_int(char)
+      assert(ok, "failed to parse block in a level")
+      append(&row, i)
+      // fmt.println(char)
+    }
+
+    append(&rows, row)
+  }
+
+  entities := init_level(width, height, len(rows), cols, rows, arena_allocator) 
+  fmt.println(len(rows))
+  return level, true
+}
+
+init_level :: proc(lvl_width, lvl_height: i32, rows, cols: int, tiles: [dynamic][dynamic]int, allocator := context.allocator) -> []Entity {
+  // NOTE(danil): I don't like using [dynamic] everywhere
+  entities := make([dynamic]Entity, allocator)
+  unit_width:f32 = cast(f32)lvl_width / cast(f32)cols
+  unit_height:f32 = cast(f32)lvl_height / cast(f32)rows
+  fmt.println("rows: ", rows)
+  fmt.println("cols: ", cols)
+  fmt.println("tiles: ", tiles)
+  fmt.println("len(tiles): ", len(tiles))
+  color:vec3
+  for x in 0..<rows {
+    for y in 0..<cols {
+      switch cast(Block_Type)tiles[x][y] {
+      case .EMPTY:
+        continue
+      case .SOLID:
+        color = vec3{1,1,1}
+      case .BLUE:
+        color = vec3{0.2, 0.6, 1}
+      case .GREEN:
+        color = vec3{0, 0.7, 0}
+      case .GOLDEN:
+        color = vec3{0.8, 0.8, 0.4}
+      case .RED:
+        color = vec3{1, 0.5, 0}
+      case:
+        assert(false, "unreachable")
+      }
+
+      pos := vec2{ unit_width * cast(f32)x, unit_height * cast(f32)y }
+      size := vec2{ unit_width, unit_height }
+      spr := Sprites["block"]
+      spr.color = color
+      entity := Entity{
+        pos = pos,
+        size = size,
+        rotation_degrees = 0,
+        sprite = spr,
+        is_solid = true,
+      }
+      append(&entities, entity)
+    }
+  }
+
+  fmt.println(entities)
+  return entities[:]
+}
+
 
 main :: proc() {
   WINDOW_WIDTH :: 800
@@ -174,7 +306,7 @@ main :: proc() {
   }
   defer sdl.DestroyWindow(window)
   fmt.println(window)
-  stbi.set_flip_vertically_on_load(1)
+  stbi.set_flip_vertically_on_load(0)
 
   gl_context := sdl.GL_CreateContext(window)
   sdl.GL_MakeCurrent(window, gl_context)
@@ -183,11 +315,23 @@ main :: proc() {
 
   s, ok := load_shader("shaders/default.vert", "shaders/default.frag")
   sprite_render_data := init_sprite_render_data(s)
-  fmt.println(sprite_render_data)
+  Sprites["block"] = sprite_render_data
+  // fmt.println(Sprites["block"])
   game := Game{}
   start_tick := time.tick_now()
   blend:f32 = 0.2
   projection := glm.mat4Ortho3d(0, WINDOW_WIDTH, WINDOW_HEIGHT, 0, -1, 1)
+  face, face_ok := load_texture("awesomeface.png", 4, gl.RGBA)
+  if !face_ok {
+    fmt.eprintln("Couldn't load texture awesomeface.png")
+    return
+  }
+
+  level, level_ok := load_level("1.lvl", 800, 600)
+  if !level_ok {
+    fmt.eprintln("COULDN'T LOAD LEVEL AAAAAAAAAAAAAAAAAAAAA")
+  }
+  free_all(context.temp_allocator)
 
   loop: for {
     event: sdl.Event
@@ -226,7 +370,7 @@ main :: proc() {
     counter := sdl.GetPerformanceCounter()
     freq := sdl.GetPerformanceFrequency()
     t:f32 = cast(f32)(cast(f32)counter  /  cast(f32)freq)
-    render_game(game, sprite_render_data)
+    render_game(game, face, sprite_render_data, &projection)
     sdl.GL_SwapWindow(window)
   }
   fmt.println("hello world")
