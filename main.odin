@@ -17,6 +17,14 @@ import "core:container/small_array"
 vec4 :: [4]f32
 vec3 :: [3]f32
 vec2 :: [2]f32
+WINDOW_WIDTH :: 800
+WINDOW_HEIGHT :: 600
+
+PLAYER_SIZE :: vec2{100, 20} 
+BALL_VELOCITY :: vec2{ 100 , -350 * 2 }
+BALL_RADIUS:f32:12.5
+PLAYER_INITIAL_POS :=  vec2{cast(f32)(cast(f32)WINDOW_WIDTH / 2 - PLAYER_SIZE.x / 2), cast(f32)(cast(f32)WINDOW_HEIGHT - PLAYER_SIZE.y)}
+BALL_INITIAL_POS := PLAYER_INITIAL_POS + { PLAYER_SIZE.x / 2 - BALL_RADIUS, -BALL_RADIUS * 2, }
 
 Shader :: struct {
   uniforms: gl.Uniforms,
@@ -113,7 +121,7 @@ Ball :: struct {
   using entity: Entity,
   radius: f32,
   stuck: bool,
-  velocity: f32,
+  velocity: vec2,
 }
 
 Game_Level :: struct {
@@ -136,6 +144,7 @@ Entity :: struct {
 Brick :: struct {
   using entity: Entity,
   is_solid: bool,
+  destroyed: bool,
   color: vec3,
 }
 
@@ -162,6 +171,18 @@ Sprite2D :: struct {
   texture: ^Texture2D,
 }
 
+Direction :: enum {
+  UP,
+  RIGHT,
+  DOWN,
+  LEFT
+}
+
+Collision :: struct {
+  occured: bool,
+  direction: Direction,
+  distance: vec2,
+}
 
 init_sprite_render_data :: proc(s: Shader, tex: ^Texture2D) -> (rd: Sprite2D) {
   vbo: u32
@@ -214,41 +235,130 @@ draw_sprite :: proc(pos, size: vec2, rotation_angle: f32, rd: Sprite2D, color: v
   gl.DrawArrays(gl.TRIANGLES, 0, 6)
 }
 
+vector_direction :: proc(target: vec2) -> Direction {
+  compass := [?]vec2 {
+    {0, 1},
+    {1, 0},
+    {0, -1},
+    {-1, 0},
+  }
+
+  max:f32 = 0
+  best_match := -1
+  for direct, index in compass {
+    dot_product: f32 = glm.dot(glm.normalize(target), direct)
+    if dot_product > max {
+      max = dot_product
+      best_match = index
+    }
+  }
+
+  return cast(Direction)best_match
+}
+
 update_game :: proc(game: ^Game, dt: f32) {
   if game.state == GameState.Active {    // velocity := 0
-    BALL_VELOCITY :: vec2{ 100, -350 }
+    // ball movement
     ball := game.ball
+    player := game.player
     if !ball.stuck {
-      pos := BALL_VELOCITY * dt
-      if pos.x <= 1 {
-        
+      ball.pos += ball.velocity * dt
+      if ball.pos.x <= 1 {
+        ball.velocity.x = -ball.velocity.x
+        ball.pos.x = 0  
+      } else if ball.pos.x + ball.size.x >= cast(f32)game.width {
+        ball.velocity.x = -ball.velocity.x
+        ball.pos.x = cast(f32)game.width - ball.size.x
       }
+      if ball.pos.y <= 0 {
+        ball.velocity.y = -ball.velocity.y
+        ball.pos.y = 0
+      }
+    }
+    check_collision :: proc(ball: ^Ball, entity: Entity) -> Collision {
+      center := ball.pos + ball.radius 
+      aabb_half_extents := entity.size / 2
+      aabb_center := entity.pos + aabb_half_extents
 
+      difference := center - aabb_center
+      clamped := glm.clamp(difference, -aabb_half_extents, aabb_half_extents)
+      closest := aabb_center + clamped
+      difference = closest - center
+      if glm.length(difference) < ball.radius {
+        return Collision{ true, vector_direction(difference), difference }
+      } else {
+        return Collision{ false, .UP, vec2{0,0} }
+      }
     }
 
-    velocity := game.player.velocity * dt
+    // checking collisions
+    for &brick in game.levels[game.active_level].bricks {
+      if !brick.destroyed {
+        collision := check_collision(ball, brick)
+        if collision.occured {
+          if !brick.is_solid do brick.destroyed = true 
+          dir := collision.direction
+          diff := collision.distance
+          if dir == .LEFT || dir == .RIGHT {
+            ball.velocity.x = -ball.velocity.x
+            penetration:f32 = ball.radius - glm.abs(diff.x)
+            if dir == .LEFT {
+              ball.pos.x += penetration
+            } else {
+              ball.pos.x -= penetration
+            }
+          } else {
+            ball.velocity.y = -ball.velocity.y
+            penetration:f32 = ball.radius - glm.abs(diff.y)
+            if dir == .UP {
+              ball.pos.y += penetration
+            } else {
+              ball.pos.y -= penetration
+            }
+          }
+        }
+      }
+    }
+
+    collision := check_collision(ball, player)
+    if !ball.stuck && collision.occured {
+      center_board := player.pos.x + player.size.x / 2
+      distance := ball.pos.x + ball.radius - center_board
+      percentage := distance / (player.size.x / 2)
+      strength:f32 = 2
+      old_velocity := ball.velocity
+      ball.velocity.x = BALL_VELOCITY.x * percentage * strength
+      ball.velocity.y = -1 * glm.abs(ball.velocity.y)
+      ball.velocity = glm.normalize(ball.velocity) * glm.length(old_velocity)
+    }
+
+    if ball.pos.y >= cast(f32)game.height {
+      reset_level(game)
+      reset_player(game.player)
+    }
+
+    player_velocity := game.player.velocity * dt
     for k in game.keys {
       #partial switch cast(sdl.Scancode)k {
         case .A: {
           if game.keys[k].is_down {
             if game.player.pos.x >= 0 {
-              game.player.pos.x -= velocity
+              game.player.pos.x -= player_velocity
 
-              if ball.stuck do ball.pos.x -= velocity
+              if ball.stuck do ball.pos.x -= player_velocity
             }
           }
         }
         case .D: {
           if game.keys[k].is_down {
             if game.player.pos.x <= cast(f32)game.width - game.player.size.x {
-              game.player.pos.x += velocity
-              if ball.stuck do ball.pos.x += velocity
+              game.player.pos.x += player_velocity
+              if ball.stuck do ball.pos.x += player_velocity
             }
           }
         }
         case .SPACE:
-          ball.stuck = false
-          fmt.println(ball)
+          if game.keys[k].is_down do ball.stuck = false
       }
     }
     // for k in small_array.slice(&game.keys) {
@@ -274,7 +384,9 @@ render_game :: proc(game: ^Game, tex: Texture2D, rd: Sprite2D, projection: ^matr
 
   lvl := game.levels[game.active_level]
   for brick in lvl.bricks {
-    draw_sprite(brick.pos, brick.size, brick.rotation_degrees, brick.sprite^, brick.color, projection)
+    if !brick.destroyed {
+      draw_sprite(brick.pos, brick.size, brick.rotation_degrees, brick.sprite^, brick.color, projection)
+    }
   }
 
   // player
@@ -329,9 +441,9 @@ load_level :: proc(game: ^Game, name: string, width, height: i32) -> (ok: bool) 
     append(&rows, row)
   }
 
-  bricks := init_level_entities(width, height, len(rows), cols, rows, arena_allocator)
+  bricks := init_level_bricks(width, height, len(rows), cols, rows, arena_allocator)
 
-  PLAYER_VELOCITY :: 500
+  PLAYER_VELOCITY :: 700
   PLAYER_SIZE :: vec2{100, 20} 
   player_sprite := &Sprites["paddle"]
   player_pos := vec2{
@@ -354,7 +466,7 @@ load_level :: proc(game: ^Game, name: string, width, height: i32) -> (ok: bool) 
   return true
 }
 
-init_level_entities :: proc(lvl_width, lvl_height: i32, rows, cols: int, tiles: [dynamic][dynamic]int, allocator := context.allocator) -> []Brick {
+init_level_bricks :: proc(lvl_width, lvl_height: i32, rows, cols: int, tiles: [dynamic][dynamic]int, allocator := context.allocator) -> []Brick {
   // NOTE(danil): I don't like using [dynamic] everywhere
   entities := make([dynamic]Brick, allocator)
   unit_width:f32 = cast(f32)lvl_width / cast(f32)cols
@@ -365,9 +477,9 @@ init_level_entities :: proc(lvl_width, lvl_height: i32, rows, cols: int, tiles: 
   // fmt.println("len(tiles): ", len(tiles))
   spr := &Sprites["block"]
   color:vec3
-  is_solid := false
   for y in 0..<rows {
     for x in 0..<len(tiles[y]) {
+      is_solid := false
       spr := &Sprites["block"]
       color:vec3
       switch cast(Block_Type)tiles[y][x] {
@@ -405,10 +517,19 @@ init_level_entities :: proc(lvl_width, lvl_height: i32, rows, cols: int, tiles: 
   return entities[:]
 }
 
+reset_level :: proc(game: ^Game) {
+  for &brick in game.levels[game.active_level].bricks {
+    brick.destroyed = false
+    game.ball.pos = BALL_INITIAL_POS
+  }
+    game.ball.stuck = true
+}
+
+reset_player :: proc(player: ^Player) {
+  player.pos = PLAYER_INITIAL_POS
+}
 
 main :: proc() {
-  WINDOW_WIDTH :: 800
-  WINDOW_HEIGHT :: 600
   sdl.Init({.TIMER, .VIDEO})
 
   window := sdl.CreateWindow("SDL2", sdl.WINDOWPOS_UNDEFINED, sdl.WINDOWPOS_UNDEFINED, WINDOW_WIDTH, WINDOW_HEIGHT, {.OPENGL, .RESIZABLE})
@@ -471,7 +592,6 @@ main :: proc() {
   Sprites["paddle"] = paddle_sprite
 
   PLAYER_VELOCITY :: 500
-  PLAYER_SIZE :: vec2{100, 20} 
   player_sprite := &Sprites["paddle"]
   player_pos := vec2{
     cast(f32)(cast(f32)WINDOW_WIDTH / 2 - PLAYER_SIZE.x / 2), 
@@ -493,7 +613,6 @@ main :: proc() {
   ball_sprite := init_sprite_render_data(s, &ball_tex)
   Sprites["ball"] = ball_sprite
 
-  BALL_RADIUS:f32:12.5
   ball := Ball{
     pos = player_pos + {
       PLAYER_SIZE.x / 2 - BALL_RADIUS,
@@ -502,6 +621,7 @@ main :: proc() {
     sprite = &ball_sprite,
     radius = BALL_RADIUS,
     stuck = true,
+    velocity = BALL_VELOCITY,
   }
   game := Game{
     state = GameState.Active,
