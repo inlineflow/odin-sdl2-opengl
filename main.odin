@@ -12,6 +12,7 @@ import "core:os"
 import "core:strings"
 import "core:strconv"
 import vmem "core:mem/virtual"
+import "core:container/small_array"
 
 vec4 :: [4]f32
 vec3 :: [3]f32
@@ -91,13 +92,23 @@ GameState :: enum {
   Win,
 }
 
+Key :: struct {
+  code: sdl.Keycode,
+  was_down: bool,
+  is_down: bool,
+}
+
 Game :: struct {
-  State: GameState,
+  state: GameState,
   width: i32,
   height: i32,
-  keys: []sdl.Keycode,
+  keys: map[i32]Key, // this is sdl.Scancode
   levels: []Game_Level,
+  player: ^Player,
+  active_level: i32,
 }
+
+pp: ^Player = nil
 
 Game_Level :: struct {
   rows: i32,
@@ -199,7 +210,45 @@ draw_sprite :: proc(pos, size: vec2, rotation_angle: f32, rd: Sprite2D, color: v
   gl.DrawArrays(gl.TRIANGLES, 0, 6)
 }
 
-render_game :: proc(game: Game, tex: Texture2D, rd: Sprite2D, projection: ^matrix[4,4]f32) {
+update_game :: proc(game: ^Game, dt: f32) {
+  if game.state == GameState.Active {    // velocity := 0
+    velocity := pp.velocity * dt
+    fmt.printfln("player velocity: %f", velocity)
+    for k in game.keys {
+      #partial switch cast(sdl.Scancode)k {
+        case .A: {
+          if game.keys[k].is_down {
+            if game.player.pos.x >= 0 {
+              game.player.pos.x -= velocity
+            }
+          }
+        }
+        case .D: {
+          if game.keys[k].is_down {
+            if game.player.pos.x <= cast(f32)game.width - game.player.size.x {
+              game.player.pos.x += velocity
+            }
+          }
+        }
+      }
+    }
+    // for k in small_array.slice(&game.keys) {
+    //   #partial switch k {
+    //   case .A:
+    //     if game.player.pos.x >= 0 {
+    //       game.player.pos.x -= velocity
+    //     }
+    //   case .D:
+    //     if game.player.pos.x <= cast(f32)game.width - game.player.size.x {
+    //       game.player.pos.x += velocity
+    //     }
+    //
+    //   }
+    // }
+  }
+}
+
+render_game :: proc(game: ^Game, tex: Texture2D, rd: Sprite2D, projection: ^matrix[4,4]f32) {
   background := Sprites["background"]
   draw_sprite(vec2{0, 0}, vec2{cast(f32)game.width, cast(f32)game.height}, 0, background, vec3{1, 1, 1}, projection)
 
@@ -323,7 +372,7 @@ init_level_entities :: proc(lvl_width, lvl_height: i32, rows, cols: int, tiles: 
       brick.color = color
 
       // brick := Brick{
-      //   pos = pos,
+ //   pos = pos,
       //   size = size,
       //   rotation_degrees = 0,
       //   sprite = spr,
@@ -347,6 +396,7 @@ init_level_entities :: proc(lvl_width, lvl_height: i32, rows, cols: int, tiles: 
   p.sprite = player_sprite
   p.size = PLAYER_SIZE
   p.velocity = PLAYER_VELOCITY
+  pp = p
   append(&entities, p)
   return entities[:]
 }
@@ -355,7 +405,7 @@ init_level_entities :: proc(lvl_width, lvl_height: i32, rows, cols: int, tiles: 
 main :: proc() {
   WINDOW_WIDTH :: 800
   WINDOW_HEIGHT :: 600
-
+  sdl.Init({.TIMER, .VIDEO})
 
   window := sdl.CreateWindow("SDL2", sdl.WINDOWPOS_UNDEFINED, sdl.WINDOWPOS_UNDEFINED, WINDOW_WIDTH, WINDOW_HEIGHT, {.OPENGL, .RESIZABLE})
   if window == nil {
@@ -419,31 +469,62 @@ main :: proc() {
     fmt.eprintln("COULDN'T LOAD LEVEL AAAAAAAAAAAAAAAAAAAAA")
     return
   }
+
   free_all(context.temp_allocator)
+
   game := Game{
-    State = GameState.Active,
+    state = GameState.Active,
     width = WINDOW_WIDTH,
     height = WINDOW_HEIGHT,
-    keys = nil,
     levels = []Game_Level { level },
+    active_level = 1,
+    player = pp,
+    keys = make(map[i32]Key),
   }
 
+
+  now:u64 = 0
+  last: u64 = sdl.GetPerformanceCounter()
+  dt: f32 = 0
+  freq := sdl.GetPerformanceFrequency()
+
   loop: for {
+    
+    now = sdl.GetPerformanceCounter()
+    elapsed_ticks: u64 = now - last
+    dt = cast(f32)(cast(f64)elapsed_ticks / cast(f64)freq) // in seconds
+    last = now
+
     event: sdl.Event
     for sdl.PollEvent(&event) {
       #partial switch event.type {
       case .KEYDOWN: 
+        fallthrough
+      case .KEYUP:
+        // key := event.key.keysym.sym
+        // key.code = event.key.keysym.sym
+        was_down := false
+        is_down := event.key.state == sdl.PRESSED
+        if event.key.state == sdl.RELEASED {
+          was_down = true
+        } else if event.key.repeat != 0 {
+          was_down = true
+        }
+
         #partial switch event.key.keysym.sym {
         case .ESCAPE:
           break loop
-        case .DOWN:
-          new_val:f32 = blend - 0.1
-          blend = math.max(0, new_val)
-          fmt.println(blend)
-        case .UP:
-          new_val:f32 = blend + 0.1
-          blend = math.min(1, new_val)
-          fmt.println(blend)
+        }
+        #partial switch event.key.keysym.scancode {
+        case .A:
+          fallthrough
+        case .D:
+          new_key := Key{
+            is_down = is_down,
+            was_down = was_down,
+            code = event.key.keysym.sym,
+          }
+          game.keys[cast(i32)event.key.keysym.scancode] = new_key
         }
         case .QUIT: 
           break loop
@@ -459,13 +540,13 @@ main :: proc() {
       }
     }
 
-
     gl.ClearColor(0.2, 0.3, 0.3, 1.0)
     gl.Clear(gl.COLOR_BUFFER_BIT)
-    counter := sdl.GetPerformanceCounter()
-    freq := sdl.GetPerformanceFrequency()
-    t:f32 = cast(f32)(cast(f32)counter  /  cast(f32)freq)
-    render_game(game, block, sprite_render_data, &projection)
+    // fmt.println(dt * 1000)
+    fmt.println(dt)
+    update_game(&game, dt)
+    render_game(&game, block, sprite_render_data, &projection)
+    fmt.println(game.keys)
     sdl.GL_SwapWindow(window)
   }
   fmt.println("hello world")
