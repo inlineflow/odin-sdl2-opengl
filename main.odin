@@ -103,19 +103,25 @@ Game :: struct {
   width: i32,
   height: i32,
   keys: map[i32]Key, // this is sdl.Scancode
-  levels: []Game_Level,
+  levels: [dynamic]Game_Level,
   player: ^Player,
+  ball: ^Ball,
   active_level: i32,
 }
 
-pp: ^Player = nil
+Ball :: struct {
+  using entity: Entity,
+  radius: f32,
+  stuck: bool,
+  velocity: f32,
+}
 
 Game_Level :: struct {
   rows: i32,
   cols: i32,
   width: i32,
   height: i32,
-  entities: []Entity,
+  bricks: []Brick,
   is_complete: bool,
   arena: vmem.Arena,
 }
@@ -125,8 +131,6 @@ Entity :: struct {
   size: vec2,
   sprite: ^Sprite2D,
   rotation_degrees: f32,
-
-  variant: union {^Brick, ^Player}
 }
 
 Brick :: struct {
@@ -212,14 +216,25 @@ draw_sprite :: proc(pos, size: vec2, rotation_angle: f32, rd: Sprite2D, color: v
 
 update_game :: proc(game: ^Game, dt: f32) {
   if game.state == GameState.Active {    // velocity := 0
-    velocity := pp.velocity * dt
-    // fmt.printfln("player velocity: %f", velocity)
+    BALL_VELOCITY :: vec2{ 100, -350 }
+    ball := game.ball
+    if !ball.stuck {
+      pos := BALL_VELOCITY * dt
+      if pos.x <= 1 {
+        
+      }
+
+    }
+
+    velocity := game.player.velocity * dt
     for k in game.keys {
       #partial switch cast(sdl.Scancode)k {
         case .A: {
           if game.keys[k].is_down {
             if game.player.pos.x >= 0 {
               game.player.pos.x -= velocity
+
+              if ball.stuck do ball.pos.x -= velocity
             }
           }
         }
@@ -227,9 +242,13 @@ update_game :: proc(game: ^Game, dt: f32) {
           if game.keys[k].is_down {
             if game.player.pos.x <= cast(f32)game.width - game.player.size.x {
               game.player.pos.x += velocity
+              if ball.stuck do ball.pos.x += velocity
             }
           }
         }
+        case .SPACE:
+          ball.stuck = false
+          fmt.println(ball)
       }
     }
     // for k in small_array.slice(&game.keys) {
@@ -252,16 +271,19 @@ render_game :: proc(game: ^Game, tex: Texture2D, rd: Sprite2D, projection: ^matr
   background := Sprites["background"]
   draw_sprite(vec2{0, 0}, vec2{cast(f32)game.width, cast(f32)game.height}, 0, background, vec3{1, 1, 1}, projection)
 
-  for lvl in game.levels {
-    for entity in lvl.entities {
-      switch e in entity.variant {
-      case ^Brick:
-        draw_sprite(e.pos, e.size, e.rotation_degrees, e.sprite^, e.color, projection)
-      case ^Player:
-        draw_sprite(e.pos, e.size, e.rotation_degrees, e.sprite^, vec3{1,1,1}, projection)
-      }
-    }
+
+  lvl := game.levels[game.active_level]
+  for brick in lvl.bricks {
+    draw_sprite(brick.pos, brick.size, brick.rotation_degrees, brick.sprite^, brick.color, projection)
   }
+
+  // player
+  p := game.player
+  draw_sprite(p.pos, p.size, p.rotation_degrees, p.sprite^, vec3{1,1,1}, projection)
+
+  // ball
+  b := game.ball
+  draw_sprite(b.pos, vec2{ b.radius * 2, b.radius * 2 }, b.rotation_degrees, b.sprite^, vec3{1,1,1}, projection)
 }
 
 Block_Type :: enum {
@@ -275,7 +297,7 @@ Block_Type :: enum {
 
 Sprites := map[string]Sprite2D{}
 
-load_level :: proc(name: string, width, height: i32) -> (level: Game_Level, ok: bool) {
+load_level :: proc(game: ^Game, name: string, width, height: i32) -> (ok: bool) {
   level_arena: vmem.Arena
   arena_allocator := vmem.arena_allocator(&level_arena)
   dir := "levels/"
@@ -307,28 +329,34 @@ load_level :: proc(name: string, width, height: i32) -> (level: Game_Level, ok: 
     append(&rows, row)
   }
 
-  entities := init_level_entities(width, height, len(rows), cols, rows, arena_allocator)
+  bricks := init_level_entities(width, height, len(rows), cols, rows, arena_allocator)
+
+  PLAYER_VELOCITY :: 500
+  PLAYER_SIZE :: vec2{100, 20} 
+  player_sprite := &Sprites["paddle"]
+  player_pos := vec2{
+    cast(f32)(cast(f32)width / 2 - PLAYER_SIZE.x / 2), 
+    cast(f32)(cast(f32)height - PLAYER_SIZE.y)}
+
+  // p := new_entity(Player, context.allocator)
+
   lvl := Game_Level{
     rows = cast(i32)len(rows),
     cols = cast(i32)cols,
     width = width,
     height = height,
-    entities = entities,
+    bricks = bricks,
     is_complete = false,
     arena = level_arena,
   }
-  return lvl, true
+
+  append(&game.levels, lvl)
+  return true
 }
 
-new_entity :: proc($T: typeid, allocator := context.allocator) -> ^T {
-  e := new(T, allocator)
-  e.variant = e
-  return e
-}
-
-init_level_entities :: proc(lvl_width, lvl_height: i32, rows, cols: int, tiles: [dynamic][dynamic]int, allocator := context.allocator) -> []Entity {
+init_level_entities :: proc(lvl_width, lvl_height: i32, rows, cols: int, tiles: [dynamic][dynamic]int, allocator := context.allocator) -> []Brick {
   // NOTE(danil): I don't like using [dynamic] everywhere
-  entities := make([dynamic]Entity, allocator)
+  entities := make([dynamic]Brick, allocator)
   unit_width:f32 = cast(f32)lvl_width / cast(f32)cols
   unit_height:f32 = cast(f32)lvl_height / 2 / cast(f32)rows
   // fmt.println("rows: ", rows)
@@ -363,41 +391,17 @@ init_level_entities :: proc(lvl_width, lvl_height: i32, rows, cols: int, tiles: 
 
       pos := vec2{ unit_width * cast(f32)x, unit_height * cast(f32)y }
       size := vec2{ unit_width, unit_height }
-      brick := new_entity(Brick, allocator)
-      brick.pos = pos
-      brick.size = size
-      brick.rotation_degrees = 0
-      brick.sprite = spr
-      brick.is_solid = is_solid
-      brick.color = color
-
-      // brick := Brick{
- //   pos = pos,
-      //   size = size,
-      //   rotation_degrees = 0,
-      //   sprite = spr,
-      //   is_solid = is_solid,
-      //   color = color,
-      //   variant = {^Brick},
-      // }
+      brick := Brick{
+        pos = pos,
+        size = size,
+        sprite = spr,
+        is_solid = is_solid,
+        color = color,
+      }
       append(&entities, brick)
     }
   }
 
-  PLAYER_VELOCITY :: 500
-  PLAYER_SIZE :: vec2{100, 20} 
-  player_sprite := &Sprites["paddle"]
-  player_pos := vec2{
-    cast(f32)(cast(f32)lvl_width / 2 - PLAYER_SIZE.x / 2), 
-    cast(f32)(cast(f32)lvl_height - PLAYER_SIZE.y)}
-
-  p := new_entity(Player, allocator)
-  p.pos = player_pos
-  p.sprite = player_sprite
-  p.size = PLAYER_SIZE
-  p.velocity = PLAYER_VELOCITY
-  pp = p
-  append(&entities, p)
   return entities[:]
 }
 
@@ -420,6 +424,8 @@ main :: proc() {
   sdl.GL_MakeCurrent(window, gl_context)
   gl.load_up_to(3, 3, sdl.gl_set_proc_address)
   gl.Viewport(0, 0, WINDOW_WIDTH, WINDOW_HEIGHT)
+  gl.Enable(gl.BLEND)
+  gl.BlendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA)
 
   s, ok := load_shader("shaders/default.vert", "shaders/default.frag")
   if !ok {
@@ -464,25 +470,57 @@ main :: proc() {
   paddle_sprite := init_sprite_render_data(s, &paddle)
   Sprites["paddle"] = paddle_sprite
 
-  level, level_ok := load_level("1.lvl", WINDOW_WIDTH, WINDOW_HEIGHT)
+  PLAYER_VELOCITY :: 500
+  PLAYER_SIZE :: vec2{100, 20} 
+  player_sprite := &Sprites["paddle"]
+  player_pos := vec2{
+    cast(f32)(cast(f32)WINDOW_WIDTH / 2 - PLAYER_SIZE.x / 2), 
+    cast(f32)(cast(f32)WINDOW_HEIGHT - PLAYER_SIZE.y)}
+
+  player := Player{
+    pos = player_pos,
+    sprite = player_sprite,
+    size = PLAYER_SIZE,
+    velocity = PLAYER_VELOCITY,
+  }
+
+  ball_tex, ball_tex_ok := load_texture("awesomeface.png", 4, gl.RGBA)
+  if !ball_tex_ok {
+    fmt.eprintln("Couldn't load texture awesomeface.png")
+    return
+  }
+
+  ball_sprite := init_sprite_render_data(s, &ball_tex)
+  Sprites["ball"] = ball_sprite
+
+  BALL_RADIUS:f32:12.5
+  ball := Ball{
+    pos = player_pos + {
+      PLAYER_SIZE.x / 2 - BALL_RADIUS,
+      -BALL_RADIUS * 2,
+    },
+    sprite = &ball_sprite,
+    radius = BALL_RADIUS,
+    stuck = true,
+  }
+  game := Game{
+    state = GameState.Active,
+    width = WINDOW_WIDTH,
+    height = WINDOW_HEIGHT,
+    levels = {},
+    keys = make(map[i32]Key),
+    player = &player,
+    ball = &ball,
+  }
+
+  level_ok := load_level(&game, "1.lvl", WINDOW_WIDTH, WINDOW_HEIGHT)
   if !level_ok {
     fmt.eprintln("COULDN'T LOAD LEVEL AAAAAAAAAAAAAAAAAAAAA")
     return
   }
 
+
   free_all(context.temp_allocator)
-
-  game := Game{
-    state = GameState.Active,
-    width = WINDOW_WIDTH,
-    height = WINDOW_HEIGHT,
-    levels = []Game_Level { level },
-    active_level = 1,
-    player = pp,
-    keys = make(map[i32]Key),
-  }
-
-
   now:u64 = 0
   last: u64 = sdl.GetPerformanceCounter()
   dt: f32 = 0
@@ -519,6 +557,8 @@ main :: proc() {
         case .A:
           fallthrough
         case .D:
+          fallthrough
+        case .SPACE:
           new_key := Key{
             is_down = is_down,
             was_down = was_down,
