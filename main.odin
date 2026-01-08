@@ -213,7 +213,7 @@ draw_sprite :: proc(pos, size: vec2, rotation_angle: f32, rd: Sprite2D, color: v
 update_game :: proc(game: ^Game, dt: f32) {
   if game.state == GameState.Active {    // velocity := 0
     velocity := pp.velocity * dt
-    fmt.printfln("player velocity: %f", velocity)
+    // fmt.printfln("player velocity: %f", velocity)
     for k in game.keys {
       #partial switch cast(sdl.Scancode)k {
         case .A: {
@@ -543,10 +543,10 @@ main :: proc() {
     gl.ClearColor(0.2, 0.3, 0.3, 1.0)
     gl.Clear(gl.COLOR_BUFFER_BIT)
     // fmt.println(dt * 1000)
-    fmt.println(dt)
+    // fmt.println(dt)
     update_game(&game, dt)
     render_game(&game, block, sprite_render_data, &projection)
-    fmt.println(game.keys)
+    // fmt.println(game.keys)
     sdl.GL_SwapWindow(window)
   }
   fmt.println("hello world")
