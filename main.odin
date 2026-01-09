@@ -13,6 +13,7 @@ import "core:strings"
 import "core:strconv"
 import vmem "core:mem/virtual"
 import "core:container/small_array"
+import rand "core:math/rand"
 
 vec4 :: [4]f32
 vec3 :: [3]f32
@@ -106,12 +107,19 @@ Key :: struct {
   is_down: bool,
 }
 
+MAX_PARTICLES :: 500
+Particle_Data :: struct {
+    data: [MAX_PARTICLES]Particle,
+    last_used_particle: u32,
+}
+
 Game :: struct {
   state: GameState,
   width: i32,
   height: i32,
   keys: map[i32]Key, // this is sdl.Scancode
   levels: [dynamic]Game_Level,
+  particles: ^Particle_Data,
   player: ^Player,
   ball: ^Ball,
   active_level: i32,
@@ -151,6 +159,13 @@ Brick :: struct {
 Player :: struct {
   using entity: Entity,
   velocity: f32,
+}
+
+Particle :: struct {
+  pos: vec2,
+  velocity: vec2,
+  life: f32,
+  color: vec4,
 }
 
 Texture2D :: struct {
@@ -337,6 +352,48 @@ update_game :: proc(game: ^Game, dt: f32) {
       reset_player(game.player)
     }
 
+    update_particles(game, game.ball.radius / 2)
+
+    // particles
+    update_particles :: proc(game: ^Game, offset: vec2) {
+      new_particles := 2
+      for i in 0..<new_particles {
+        unused_particle := first_unused_particle(game.particles)
+        respawn_particle(&game.particles.data[unused_particle], game.ball, offset)
+      }
+
+      first_unused_particle :: proc(particles: ^Particle_Data) -> u32 {
+        for i in particles.last_used_particle..<len(particles.data) {
+          if particles.data[i].life <= 0 {
+            particles.last_used_particle = i;
+            return i
+          }
+        }
+
+        for i in 0..<particles.last_used_particle {
+          if particles.data[i].life <= 0 {
+            particles.last_used_particle = i;
+            return i
+          }
+        }
+
+        particles.last_used_particle = 0
+        return 0
+      }
+
+      respawn_particle :: proc(particle: ^Particle, ball: ^Ball, offset: vec2) {
+        min_val:f32 = 0
+        max_val:f32 = 100
+        random_float := min_val + (rand.float32() * (max_val - min_val))
+        random := (random_float - 50) / 10
+        color := 0.5 + rand.float32()
+        particle.pos = ball.pos + random + offset
+        particle.color = vec4{color, color, color, 1.0}
+        particle.life = 1
+        particle.velocity = ball.velocity * 0.1
+      }
+    }
+
     player_velocity := game.player.velocity * dt
     for k in game.keys {
       #partial switch cast(sdl.Scancode)k {
@@ -396,6 +453,12 @@ render_game :: proc(game: ^Game, tex: Texture2D, rd: Sprite2D, projection: ^matr
   // ball
   b := game.ball
   draw_sprite(b.pos, vec2{ b.radius * 2, b.radius * 2 }, b.rotation_degrees, b.sprite^, vec3{1,1,1}, projection)
+
+  // particles 
+  particle_sprite := Sprites["particle"]
+  for &p in game.particles.data {
+    draw_sprite(p.pos, )
+  }
 }
 
 Block_Type :: enum {
@@ -591,6 +654,15 @@ main :: proc() {
   paddle_sprite := init_sprite_render_data(s, &paddle)
   Sprites["paddle"] = paddle_sprite
 
+  particle_tex, particle_tex_ok := load_texture("particle.png", 4, gl.RGBA)
+  if !particle_tex_ok {
+    fmt.eprintln("Couldn't load texture particle.png")
+    return
+  }
+  particle_sprite := init_sprite_render_data(s, &particle_tex)
+  Sprites["particle"] = particle_sprite
+
+
   PLAYER_VELOCITY :: 500
   player_sprite := &Sprites["paddle"]
   player_pos := vec2{
@@ -623,6 +695,16 @@ main :: proc() {
     stuck = true,
     velocity = BALL_VELOCITY,
   }
+  // p_data := [MAX_PARTICLES]Particle{}
+  particles := Particle_Data {
+    data = [MAX_PARTICLES]Particle{},
+    // data = p_data,
+  }
+  for &p in particles.data {
+    p = Particle {
+      color = vec4{1, 1, 1, 1},
+    }
+  }
   game := Game{
     state = GameState.Active,
     width = WINDOW_WIDTH,
@@ -630,6 +712,7 @@ main :: proc() {
     levels = {},
     keys = make(map[i32]Key),
     player = &player,
+    particles = &particles,
     ball = &ball,
   }
 
